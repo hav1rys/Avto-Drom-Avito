@@ -1,15 +1,16 @@
 import { Markup } from 'telegraf';
 import { addFilter, listFilters, removeFilter, markSeen } from './storage/db.js';
 import { fetchDromListings } from './scrapers/drom.js';
-import { fetchAvitoListings, AvitoBlockedError } from './scrapers/avito.js';
 
 // Простое in-memory состояние диалогов по chatId. Бот личный и однопроцессный,
 // поэтому полноценная сцена/сессия (telegraf scenes) была бы лишней сложностью.
 const pending = new Map();
 
-const HELP_TEXT = `Слежу за новыми объявлениями на Drom.ru и Avito.ru и присылаю их сюда.
+const PLATFORM = 'drom';
 
-/add — добавить фильтр по ссылке. Настрой марку/цену/год на drom.ru или avito.ru, скопируй адрес страницы и пришли мне.
+const HELP_TEXT = `Слежу за новыми объявлениями на Drom.ru и присылаю их сюда.
+
+/add — добавить фильтр по ссылке. Настрой марку/цену/год на drom.ru, скопируй адрес страницы и пришли мне.
 /add_form — добавить фильтр через короткую анкету (марка, модель, цена).
 /list — список твоих фильтров, оттуда же можно удалить.
 /cancel — отменить текущее добавление фильтра.
@@ -29,20 +30,14 @@ export function registerBotHandlers(bot) {
   bot.command('add', (ctx) => {
     pending.set(ctx.chat.id, { type: 'await_link' });
     ctx.reply(
-      'Пришли ссылку на страницу с уже настроенными фильтрами на drom.ru или avito.ru.\n\n' +
+      'Пришли ссылку на страницу с уже настроенными фильтрами на drom.ru.\n\n' +
         'Например: открой сайт, выбери марку/цену/год через фильтры на самом сайте и скопируй адрес из адресной строки сюда.',
     );
   });
 
   bot.command('add_form', (ctx) => {
-    pending.set(ctx.chat.id, { type: 'form_platform', data: {} });
-    ctx.reply(
-      'Выбери площадку:',
-      Markup.inlineKeyboard([
-        Markup.button.callback('Drom.ru', 'form_platform:drom'),
-        Markup.button.callback('Avito.ru', 'form_platform:avito'),
-      ]),
-    );
+    pending.set(ctx.chat.id, { type: 'form_brand', data: {} });
+    ctx.reply('Напиши марку автомобиля (например: Toyota).');
   });
 
   bot.command('list', async (ctx) => {
@@ -52,7 +47,7 @@ export function registerBotHandlers(bot) {
     }
     for (const f of filters) {
       await ctx.reply(
-        `${f.platform === 'drom' ? 'Drom' : 'Avito'} — «${f.label}»\n${f.url}`,
+        `«${f.label}»\n${f.url}`,
         Markup.inlineKeyboard([Markup.button.callback('🗑 Удалить', `delete:${f.id}`)]),
       );
     }
@@ -63,15 +58,6 @@ export function registerBotHandlers(bot) {
     const ok = await removeFilter(id, ctx.chat.id);
     await ctx.answerCbQuery(ok ? 'Удалено' : 'Не нашёл такой фильтр');
     if (ok) await ctx.editMessageText('Фильтр удалён.');
-  });
-
-  bot.action(/^form_platform:(drom|avito)$/, async (ctx) => {
-    const platform = ctx.match[1];
-    pending.set(ctx.chat.id, { type: 'form_brand', data: { platform } });
-    await ctx.answerCbQuery();
-    await ctx.editMessageText(
-      `Площадка: ${platform === 'drom' ? 'Drom.ru' : 'Avito.ru'}\n\nНапиши марку автомобиля (например: Toyota).`,
-    );
   });
 
   bot.on('text', async (ctx) => {
@@ -93,20 +79,17 @@ export function registerBotHandlers(bot) {
 async function handleDialogStep(ctx, chatId, text, state) {
   switch (state.type) {
     case 'await_link': {
-      const platform = detectPlatform(text);
-      if (!platform) {
-        return ctx.reply(
-          'Это не похоже на ссылку с drom.ru или avito.ru. Пришли корректный адрес страницы или /cancel для отмены.',
-        );
+      if (!isDromUrl(text)) {
+        return ctx.reply('Это не похоже на ссылку с drom.ru. Пришли корректный адрес страницы или /cancel для отмены.');
       }
-      pending.set(chatId, { type: 'await_link_label', data: { platform, url: text } });
+      pending.set(chatId, { type: 'await_link_label', data: { url: text } });
       return ctx.reply('Как назвать этот фильтр? Например: «Камри до 2 млн». Или пришли "-" для автоназвания.');
     }
 
     case 'await_link_label': {
-      const label = text === '-' ? defaultLabel(state.data.platform) : text;
+      const label = text === '-' ? 'Drom фильтр' : text;
       pending.delete(chatId);
-      return saveAndConfirm(ctx, chatId, state.data.platform, state.data.url, label);
+      return saveAndConfirm(ctx, chatId, state.data.url, label);
     }
 
     case 'form_brand': {
@@ -138,11 +121,11 @@ async function handleDialogStep(ctx, chatId, text, state) {
     }
 
     case 'form_label': {
-      const { platform, brand, model, priceMin, priceMax } = state.data;
-      const label = text === '-' ? [brand, model].filter(Boolean).join(' ') || defaultLabel(platform) : text;
-      const url = buildFormUrl({ platform, brand, model, priceMin, priceMax });
+      const { brand, model, priceMin, priceMax } = state.data;
+      const label = text === '-' ? [brand, model].filter(Boolean).join(' ') || 'Drom фильтр' : text;
+      const url = buildFormUrl({ brand, model, priceMin, priceMax });
       pending.delete(chatId);
-      return saveAndConfirm(ctx, chatId, platform, url, label);
+      return saveAndConfirm(ctx, chatId, url, label);
     }
 
     default:
@@ -150,19 +133,13 @@ async function handleDialogStep(ctx, chatId, text, state) {
   }
 }
 
-function detectPlatform(url) {
+function isDromUrl(url) {
   try {
     const u = new URL(url);
-    if (/(^|\.)drom\.ru$/.test(u.hostname)) return 'drom';
-    if (/(^|\.)avito\.ru$/.test(u.hostname)) return 'avito';
+    return /(^|\.)drom\.ru$/.test(u.hostname);
   } catch {
-    return null;
+    return false;
   }
-  return null;
-}
-
-function defaultLabel(platform) {
-  return platform === 'drom' ? 'Drom фильтр' : 'Avito фильтр';
 }
 
 function parsePrice(text) {
@@ -179,15 +156,7 @@ function slugify(text) {
     .replace(/[^a-zа-я0-9]+/gi, '');
 }
 
-function buildFormUrl({ platform, brand, model, priceMin, priceMax }) {
-  if (platform === 'avito') {
-    const q = [brand, model].filter(Boolean).join(' ');
-    const params = new URLSearchParams({ q });
-    if (priceMin) params.set('pmin', String(priceMin));
-    if (priceMax) params.set('pmax', String(priceMax));
-    return `https://www.avito.ru/rossiya/avtomobili?${params.toString()}`;
-  }
-
+function buildFormUrl({ brand, model, priceMin, priceMax }) {
   const brandSlug = slugify(brand);
   const modelSlug = slugify(model);
   const pathParts = ['https://auto.drom.ru', brandSlug, modelSlug].filter(Boolean);
@@ -198,26 +167,19 @@ function buildFormUrl({ platform, brand, model, priceMin, priceMax }) {
   return `${pathParts.join('/')}/${qs ? `?${qs}` : ''}`;
 }
 
-async function saveAndConfirm(ctx, chatId, platform, url, label) {
+async function saveAndConfirm(ctx, chatId, url, label) {
   await ctx.reply(`Проверяю фильтр «${label}»…`);
   try {
-    const items = platform === 'drom' ? await fetchDromListings(url) : await fetchAvitoListings(url);
-    const filter = await addFilter({ chatId, platform, url, label });
+    const items = await fetchDromListings(url);
+    const filter = await addFilter({ chatId, platform: PLATFORM, url, label });
     // Запоминаем текущие объявления как уже увиденные, чтобы не заспамить
     // пользователя сотней старых объявлений сразу после подключения фильтра.
     await markSeen(filter.id, items.map((i) => i.id));
     await ctx.reply(
-      `Готово! Фильтр «${label}» (${platform === 'drom' ? 'Drom' : 'Avito'}) добавлен.\n` +
+      `Готово! Фильтр «${label}» добавлен.\n` +
         `Сейчас по нему ${items.length} объявлений — беру их за точку отсчёта и дальше буду присылать только новые.\n\n${url}`,
     );
   } catch (err) {
-    if (err instanceof AvitoBlockedError) {
-      await addFilter({ chatId, platform, url, label });
-      await ctx.reply(
-        'Avito сейчас не пускает автоматическую проверку (антибот). Фильтр всё равно сохранён, попробую проверить его на следующем цикле.',
-      );
-      return;
-    }
     console.error('Ошибка при первой проверке фильтра:', err);
     await ctx.reply(`Не получилось открыть эту ссылку (${err.message}). Проверь её и попробуй снова через /add или /add_form.`);
   }

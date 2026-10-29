@@ -1,18 +1,16 @@
 {
-  "name": "avto-drom-avito-bot",
+  "name": "avto-drom-bot",
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Telegram-бот, который следит за новыми объявлениями на Drom.ru и Avito.ru",
+  "description": "Telegram-бот, который следит за новыми объявлениями на Drom.ru",
   "main": "src/index.js",
   "scripts": {
-    "start": "node src/index.js",
-    "postinstall": "playwright install chromium"
+    "start": "node src/index.js"
   },
   "dependencies": {
     "cheerio": "^1.0.0",
     "dotenv": "^16.4.5",
-    "playwright": "^1.47.0",
     "telegraf": "^4.16.3"
   }
 }
